@@ -1,0 +1,172 @@
+services:
+
+  # ── PostgreSQL ─────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: bhet-postgres
+    environment:
+      POSTGRES_USER: bhet
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-bhet_dev_password}
+      POSTGRES_DB: bhet
+    volumes:
+      - ./postgres/data:/var/lib/postgresql/data
+      - ../apps/server/src/db/migrations/001_initial.sql:/docker-entrypoint-initdb.d/001_initial.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bhet"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - bhet
+
+  # ── Redis ──────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: bhet-redis
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - ./redis/data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - bhet
+
+  # ── LiveKit Server (SFU) ──────────────────────────────
+  livekit:
+    image: livekit/livekit-server:latest
+    container_name: bhet-livekit
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./livekit/livekit.yaml:/etc/livekit.yaml:ro
+    command: --config /etc/livekit.yaml
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+      - "50000-60000:50000-60000/udp"
+    restart: unless-stopped
+    networks:
+      - bhet
+
+  # ── LiveKit Egress (Recording) ────────────────────────
+  livekit-egress:
+    image: livekit/egress:latest
+    container_name: bhet-egress
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./livekit/egress.yaml:/etc/egress.yaml:ro
+      - ./recordings:/tmp/recordings
+    command: --config /etc/egress.yaml
+    cap_add:
+      - SYS_ADMIN
+    restart: unless-stopped
+    networks:
+      - bhet
+
+  # ── Whisper (Transcription) ──────────────────────────
+  whisper:
+    image: fedirz/faster-whisper-server:latest-cpu
+    container_name: bhet-whisper
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 4G
+    environment:
+      - WHISPER__MODEL=large-v3
+      - WHISPER__COMPUTE_TYPE=int8
+      - WHISPER__DEVICE=cpu
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+    networks:
+      - bhet
+
+  # ── coturn (TURN/STUN) ──────────────────────────────
+  coturn:
+    image: coturn/coturn:latest
+    container_name: bhet-coturn
+    network_mode: host
+    volumes:
+      - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+    restart: unless-stopped
+
+  # ── Backend (Fastify) ─────────────────────────────────
+  backend:
+    build:
+      context: ..
+      dockerfile: apps/server/Dockerfile
+    container_name: bhet-backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - PORT=3100
+      - DATABASE_URL=postgresql://bhet:${POSTGRES_PASSWORD:-bhet_dev_password}@postgres:5432/bhet
+      - REDIS_URL=redis://redis:6379
+      - LIVEKIT_URL=http://livekit:7880
+      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY:-devkey}
+      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET:-devsecret}
+      - JWT_SECRET=${JWT_SECRET:-dev-jwt-secret-change-me}
+      - RECORDINGS_DIR=/tmp/recordings
+      - WHISPER_URL=http://whisper:9000/v1/audio/transcriptions
+    volumes:
+      - ./recordings:/tmp/recordings:rw
+    restart: unless-stopped
+    networks:
+      - bhet
+
+  # ── Frontend (Next.js) ────────────────────────────────
+  frontend:
+    build:
+      context: ..
+      dockerfile: apps/web/Dockerfile
+    container_name: bhet-frontend
+    depends_on:
+      - backend
+    environment:
+      - NEXT_PUBLIC_BACKEND_URL=http://backend:3100/api/v1
+      - NEXT_PUBLIC_LIVEKIT_URL=ws://localhost:7880
+    restart: unless-stopped
+    networks:
+      - bhet
+
+  # ── nginx ──────────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: bhet-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/bhet.conf:/etc/nginx/conf.d/bhet.conf:ro
+    depends_on:
+      - frontend
+      - backend
+      - livekit
+    restart: unless-stopped
+    networks:
+      - bhet
+
+networks:
+  bhet:
+    driver: bridge

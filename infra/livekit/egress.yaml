@@ -1,0 +1,18 @@
+port: 0
+
+redis:
+  address: redis:6379
+
+keys:
+  - api_key: ${LIVEKIT_API_KEY:-devkey}
+    api_secret: ${LIVEKIT_API_SECRET:-devsecret}
+
+egress:
+  file_output:
+    directory: /tmp/recordings
+
+cpu_cost:
+  roomcomposite: 4
+
+logging:
+  level: info

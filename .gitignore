@@ -1,0 +1,17 @@
+node_modules
+dist
+.next
+.env
+.env.local
+*.tsbuildinfo
+turbo-*.json
+
+# Docker
+infra/postgres/data
+infra/redis/data
+infra/recordings
+infra/.env
+infra/nginx/ssl
+
+# OS
+.DS_Store
